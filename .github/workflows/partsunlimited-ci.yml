@@ -1,0 +1,86 @@
+
+name: Unlimited Parts-ASP.NET-CI
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BUILD_CONFIGURATION: Release
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  build:
+    name: Build and Test ASP.NET
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - parts-unlimited
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Check .NET version
+        run: dotnet --version
+
+      - name: Restore NuGet packages
+        run: >
+          dotnet restore
+          ci-demo/PartsUnlimited.Tests/PartsUnlimited.Tests.csproj
+
+      - name: Build solution
+        run: >
+          dotnet build
+          ci-demo/PartsUnlimited.Tests/PartsUnlimited.Tests.csproj
+          --configuration $env:BUILD_CONFIGURATION
+          --no-restore
+
+      - name: Run unit tests
+        run: >
+          dotnet test
+          ci-demo/PartsUnlimited.Tests/PartsUnlimited.Tests.csproj
+          --configuration $env:BUILD_CONFIGURATION
+          --no-build
+          --logger "trx;LogFileName=tests.trx"
+          --results-directory test-results
+
+      - name: Publish ASP.NET application
+        run: >
+          dotnet publish
+          ci-demo/PartsUnlimited.Web/PartsUnlimited.Web.csproj
+          --configuration $env:BUILD_CONFIGURATION
+          --no-restore
+          --output publish
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: publish/
+          retention-days: 30
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-TestResults
+          path: test-results/*.trx
+          if-no-files-found: warn
+          retention-days: 30
