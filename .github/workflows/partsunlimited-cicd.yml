@@ -1,0 +1,185 @@
+
+name: Unlimited Parts-CI-CD-YAML
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ci-demo/**'
+      - '.github/workflows/partsunlimited-cicd.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  DOTNET_INSTALL_DIR: 'C:\actions-runner\_dotnet'
+  BUILD_CONFIGURATION: Release
+
+concurrency:
+  group: partsunlimited-local-deploy
+  cancel-in-progress: false
+
+jobs:
+
+  build:
+    name: Build and Test
+
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - parts-unlimited
+
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Check SDK version
+        run: dotnet --version
+
+      - name: Restore packages
+        run: |
+          dotnet restore ci-demo/PartsUnlimited.Tests/PartsUnlimited.Tests.csproj
+          dotnet restore ci-demo/PartsUnlimited.Web/PartsUnlimited.Web.csproj
+
+      - name: Build application and tests
+        run: |
+          dotnet build ci-demo/PartsUnlimited.Tests/PartsUnlimited.Tests.csproj --configuration Release --no-restore
+
+      - name: Run unit tests
+        run: |
+          dotnet test ci-demo/PartsUnlimited.Tests/PartsUnlimited.Tests.csproj --configuration Release --no-build --logger "trx;LogFileName=tests.trx" --results-directory test-results
+
+      - name: Publish application
+        run: |
+          dotnet publish ci-demo/PartsUnlimited.Web/PartsUnlimited.Web.csproj --configuration Release --no-restore --output publish
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-drop
+          path: publish/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-TestResults
+          path: test-results/*.trx
+          if-no-files-found: warn
+
+  deploy:
+    name: Deploy and Verify
+    needs: build
+
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - parts-unlimited
+
+    environment:
+      name: partsunlimited-local
+      url: http://localhost:5080
+
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PartsUnlimited-drop
+          path: downloaded-app
+
+      - name: Deploy application locally
+        run: |
+          $target = "C:\actions-runner\deployments\PartsUnlimited"
+
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+          Copy-Item -Path "downloaded-app\*" -Destination $target -Recurse -Force
+
+          $app = Join-Path $target "PartsUnlimited.Web.dll"
+
+          if (-not (Test-Path $app)) {
+            throw "Deployment failed: PartsUnlimited.Web.dll not found"
+          }
+
+          Write-Host "Application deployed to $target"
+
+      - name: Start application and verify HTTP
+        run: |
+          $target = "C:\actions-runner\deployments\PartsUnlimited"
+          $app = Join-Path $target "PartsUnlimited.Web.dll"
+          $dotnet = "C:\actions-runner\_dotnet\dotnet.exe"
+          $url = "http://127.0.0.1:5080"
+
+          $process = Start-Process `
+            -FilePath $dotnet `
+            -ArgumentList @($app, "--urls", $url) `
+            -WorkingDirectory $target `
+            -PassThru
+
+          try {
+            $ready = $false
+
+            for ($i = 0; $i -lt 20; $i++) {
+              Start-Sleep -Seconds 2
+
+              if ($process.HasExited) {
+                throw "Application process exited unexpectedly"
+              }
+
+              try {
+                $response = Invoke-RestMethod `
+                  -Uri "$url/health" `
+                  -TimeoutSec 3
+
+                if ($response -eq "Healthy") {
+                  $ready = $true
+                  break
+                }
+              }
+              catch {
+                Write-Host "Waiting for application..."
+              }
+            }
+
+            if (-not $ready) {
+              throw "Health check failed"
+            }
+
+            $homepage = Invoke-RestMethod `
+              -Uri $url `
+              -TimeoutSec 5
+
+            Write-Host "Homepage response: $homepage"
+
+            if ($homepage -notmatch "Parts Unlimited") {
+              throw "Unexpected homepage content"
+            }
+
+            Write-Host "DEPLOYMENT VERIFIED SUCCESSFULLY"
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
