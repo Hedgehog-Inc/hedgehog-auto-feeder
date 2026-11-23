@@ -13,7 +13,7 @@ permissions:
 
 env:
   BUILD_CONFIGURATION: Release
-  DOTNET_VERSION: '10.0.x'
+  DOTNET_VERSION: '8.0.x'
   DOTNET_INSTALL_DIR: 'C:\actions-runner\_dotnet'
 
 jobs:
